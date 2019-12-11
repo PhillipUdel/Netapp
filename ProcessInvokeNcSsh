@@ -1,0 +1,145 @@
+Function ProcessInvokeNcSsh ([String]$Command)
+{
+	$InvokeValue = (Invoke-NcSsh -Command $Command -ErrorAction SilentlyContinue -WarningAction SilentlyContinue).Value
+	if (!( $Command.ToLower().Contains('-fields ')))
+	{
+		write-host 'Error: Command Must Have -fields '
+		write-host 'Example: Disk Show  -fields disk,usable-size,shelf,bay,type,Container-name,container-type-fields'
+	}
+
+	[Array]$InvokeValueArray = $InvokeValue.Split([Environment]::NewLine)
+	$Tick = 0
+	[Switch]$Debug = $False
+	$HeaderLines = @()
+	$DataLines = @()
+	
+	[Switch]$IsHeaderLines = $False
+	[Switch]$IsDataLines = $False
+	[Switch]$IsInfoLines = $False
+	
+	foreach ($line in $InvokeValueArray)
+	{
+		if ($line.Contains('Last login time:')) {$IsHeaderLines = $True; $Tick++; Continue }
+		if ($line.Contains('entries were displayed.')) {$IsHeaderLines = $True; $Tick++; Continue }
+		if([string]::IsNullOrWhiteSpace($line)) {$Tick++; Continue }
+		
+		if ( ($line -match '-')  -AND ($line -notmatch '[a-zA-Z_0-9]') )
+		{
+			if ($Debug) {write-host "($line)"} 
+			$IsHeaderLines = $False
+			$IsDataLines  = $True
+			$ColumnOffSets = CreateColumnOffSets -Line $line 
+			$Tick++
+			Continue
+		}
+		
+		# Deal With Info Blocks
+		if ($line.StartsWith('Info:')) {$IsInfoLines = $True}
+		if ($line.StartsWith(' ') -AND $IsInfoLines) {$IsInfoLines = $False  ;$Tick++; Continue  }
+		if ($IsInfoLines) {$Tick++; Continue }
+		
+		if ($IsHeaderLines) {if ($Debug) {write-host "Header($line)"} ;$HeaderLines += $line}
+		if ($IsDataLines) {if ($Debug) 	{write-host "Data  ($line)"} ;$DataLines += $line}
+	
+		if ($line.Contains('entries were displayed')) {$Tick++; Continue }
+		
+		if ($Debug) {$line}
+		$Tick++
+	}
+	
+	if($DataLines.Count -GT 0)
+	{
+		# Extract The Header Names
+		$HeaderPsObject = ExtractHeaderNames -OffSets $ColumnOffSets  -Headers $HeaderLines
+		
+		# OK Now Lets Create The Object
+		$CompletedPsObject = CreatePsObject -HeaderPsObject $HeaderPsObject -DataLines $DataLines
+		return $CompletedPsObject
+	} Else 	{
+		My-Write-Host "-foregroundcolor Red There Was An Error Process Data"
+		My-Write-Host "-foregroundcolor Red $InvokeValue"
+		Return $Null
+	}
+	Return $Null
+}	
+
+Function CreateColumnOffSets ([String]$Line)
+{
+	$LineLength = $Line.Length
+	[Array]$Columns 	= $Line.Split(' ')
+	[Int]$ColumnCount		= $Columns.Count
+	[int]$Pointer = 0
+	[int]$Counter = 1
+	$ColumnObject  = @()
+	foreach ($Column in $Columns)
+	{
+		if([string]::IsNullOrWhiteSpace($Column)) {Continue}
+		$ColumnNumber 	= $Counter
+		$ColumnLength	= $Column.Length
+		$ColumnStart	= $Pointer
+		$Column = [Ordered]@{
+			ColumnNumber  	= $ColumnNumber
+			ColumnName 		= $Null
+			ColumnStart		= $ColumnStart
+			ColumnLength	= $ColumnLength
+		}
+		$ColumnObject += New-Object -TypeName PSObject -Prop $Column
+		$Pointer = $ColumnLength + $Pointer + 1
+		$Counter++
+	}
+	return $ColumnObject
+}
+
+Function ExtractHeaderNames( $OffSets,  $Headers)
+{
+	foreach ($Column in $OffSets)
+	{
+		[String]$HeaderString = $null
+		foreach($Header in $Headers)
+		{
+			$HeaderLength = $Header.Length
+			if ($HeaderLength -GT $Column.ColumnStart)
+			{
+				if ($Header.Length -GE ($Column.ColumnStart + $Column.ColumnLength ))
+				{
+					if([string]::IsNullOrWhiteSpace($HeaderString))
+					{	
+						$HeaderString = $Header.Substring($Column.ColumnStart,$Column.ColumnLength).Trim()
+					} Else {
+						$HeaderString = $HeaderString + ' ' + $Header.Substring($Column.ColumnStart,$Column.ColumnLength).Trim()
+					}
+				} else { 
+					[int]$TrimedColumnLength = $HeaderLength - $Column.ColumnStart
+					if([string]::IsNullOrWhiteSpace($HeaderString))
+					{	
+						$HeaderString = $Header.Substring($Column.ColumnStart,$TrimedColumnLength).Trim()
+					} Else {
+						$HeaderString = $HeaderString + ' ' + $Header.Substring($Column.ColumnStart,$TrimedColumnLength).Trim()
+					}
+				}
+			} 
+		}
+		$Column.ColumnName = $HeaderString
+	}
+	Return $OffSets
+}
+
+Function CreatePsObject ($HeaderPsObject, $DataLines)
+{
+	$Combined = @()
+	foreach ($line in $DataLines)
+	{
+		if([string]::IsNullOrWhiteSpace($line)) {Continue}
+		$Tick = 1
+		$Lineobj = New-Object PSCustomObject
+		foreach ($Col in $HeaderPsObject)
+		{
+			$Lineobj | Add-Member -MemberType NoteProperty -Name $Col.ColumnName -value $line.Substring($Col.ColumnStart,$Col.ColumnLength).Trim()
+			$Tick++
+		}
+		$Combined += $Lineobj
+	}
+	Return $Combined
+}
+
+
